@@ -259,7 +259,7 @@ func StartControllers(ctx context.Context, mgr manager.Manager, config *rest.Con
 	}
 
 	// ReferenceGrant controller for cross-namespace access validation
-	referenceGrantC := NewReferenceGrantController(c, logger.WithName("reference-grant"), aiGatewayRouteEventChan)
+	referenceGrantC := NewReferenceGrantController(c, logger.WithName("reference-grant"), aiGatewayRouteEventChan, mcpRouteEventChan)
 	if err = TypedControllerBuilderForCRD(mgr, &gwapiv1b1.ReferenceGrant{}).
 		Complete(referenceGrantC); err != nil {
 		return fmt.Errorf("failed to create controller for ReferenceGrant: %w", err)

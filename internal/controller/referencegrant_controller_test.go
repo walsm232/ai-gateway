@@ -80,7 +80,7 @@ func TestReferenceGrantController_Reconcile(t *testing.T) {
 		aiGatewayRouteChan := make(chan event.GenericEvent, 10)
 		logger := logr.Discard()
 
-		controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan)
+		controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan, make(chan event.GenericEvent, 10))
 
 		req := reconcile.Request{
 			NamespacedName: client.ObjectKeyFromObject(referenceGrant),
@@ -106,7 +106,7 @@ func TestReferenceGrantController_Reconcile(t *testing.T) {
 		aiGatewayRouteChan := make(chan event.GenericEvent, 10)
 		logger := logr.Discard()
 
-		controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan)
+		controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan, make(chan event.GenericEvent, 10))
 
 		req := reconcile.Request{
 			NamespacedName: client.ObjectKey{
@@ -154,7 +154,7 @@ func TestReferenceGrantController_Reconcile(t *testing.T) {
 		aiGatewayRouteChan := make(chan event.GenericEvent, 10)
 		logger := logr.Discard()
 
-		controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan)
+		controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan, make(chan event.GenericEvent, 10))
 
 		req := reconcile.Request{
 			NamespacedName: client.ObjectKeyFromObject(referenceGrant),
@@ -237,7 +237,7 @@ func TestReferenceGrantController_Reconcile(t *testing.T) {
 		aiGatewayRouteChan := make(chan event.GenericEvent, 10)
 		logger := logr.Discard()
 
-		controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan)
+		controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan, make(chan event.GenericEvent, 10))
 
 		req := reconcile.Request{
 			NamespacedName: client.ObjectKeyFromObject(referenceGrant),
@@ -274,7 +274,7 @@ func TestNewReferenceGrantController(t *testing.T) {
 	aiGatewayRouteChan := make(chan event.GenericEvent, 10)
 	logger := logr.Discard()
 
-	controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan)
+	controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan, make(chan event.GenericEvent, 10))
 
 	require.NotNil(t, controller)
 	require.Equal(t, fakeClient, controller.client)
@@ -296,7 +296,7 @@ func TestReferenceGrantController_Reconcile_GetError(t *testing.T) {
 	aiGatewayRouteChan := make(chan event.GenericEvent, 10)
 	logger := logr.Discard()
 
-	controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan)
+	controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan, make(chan event.GenericEvent, 10))
 
 	// Try to reconcile a non-existent ReferenceGrant - this should be handled gracefully
 	req := reconcile.Request{
@@ -347,7 +347,7 @@ func TestReferenceGrantController_Reconcile_GetAffectedRoutesError(t *testing.T)
 	aiGatewayRouteChan := make(chan event.GenericEvent, 10)
 	logger := logr.Discard()
 
-	controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan)
+	controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan, make(chan event.GenericEvent, 10))
 
 	req := reconcile.Request{
 		NamespacedName: client.ObjectKeyFromObject(referenceGrant),
@@ -433,7 +433,9 @@ func TestReferenceGrantController_GetAffectedAIGatewayRoutes(t *testing.T) {
 			expectedRoutes: []string{"affected-route"},
 		},
 		{
-			name: "Grant with no matching routes",
+			// The route sits outside the namespace the grant's "from" names, but still references the
+			// grant's namespace, so it is reconciled: another grant there may be what authorizes it.
+			name: "Route in another namespace referencing the grant namespace",
 			referenceGrant: gwapiv1b1.ReferenceGrant{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-grant",
@@ -475,10 +477,12 @@ func TestReferenceGrantController_GetAffectedAIGatewayRoutes(t *testing.T) {
 					},
 				},
 			},
-			expectedRoutes: []string{},
+			expectedRoutes: []string{"route-in-different-ns"},
 		},
 		{
-			name: "Grant for wrong kind",
+			// The grant no longer names AIGatewayRoute, which is exactly the revocation case: the
+			// route must still be reconciled so it can report that it is no longer authorized.
+			name: "Grant naming a different kind",
 			referenceGrant: gwapiv1b1.ReferenceGrant{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-grant",
@@ -520,7 +524,7 @@ func TestReferenceGrantController_GetAffectedAIGatewayRoutes(t *testing.T) {
 					},
 				},
 			},
-			expectedRoutes: []string{},
+			expectedRoutes: []string{"route"},
 		},
 	}
 
@@ -538,11 +542,11 @@ func TestReferenceGrantController_GetAffectedAIGatewayRoutes(t *testing.T) {
 
 			aiGatewayRouteChan := make(chan event.GenericEvent, 10)
 			logger := logr.Discard()
-			controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan)
+			controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan, make(chan event.GenericEvent, 10))
 
 			affectedRoutes, err := controller.getAffectedAIGatewayRoutes(
 				context.Background(),
-				&tt.referenceGrant,
+				tt.referenceGrant.Namespace,
 			)
 			require.NoError(t, err)
 
@@ -566,71 +570,176 @@ func TestReferenceGrantController_GetAffectedAIGatewayRoutes(t *testing.T) {
 
 		aiGatewayRouteChan := make(chan event.GenericEvent, 10)
 		logger := logr.Discard()
-		controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan)
+		controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan, make(chan event.GenericEvent, 10))
 
-		grant := &gwapiv1b1.ReferenceGrant{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-grant",
-				Namespace: "backend-ns",
-			},
-			Spec: gwapiv1b1.ReferenceGrantSpec{
-				From: []gwapiv1b1.ReferenceGrantFrom{
-					{
-						Group:     aiServiceBackendGroup,
-						Kind:      aiGatewayRouteKind,
-						Namespace: "route-ns",
-					},
-				},
-				To: []gwapiv1b1.ReferenceGrantTo{
-					{
-						Group: aiServiceBackendGroup,
-						Kind:  aiServiceBackendKind,
-					},
-				},
-			},
-		}
-
-		routes, err := controller.getAffectedAIGatewayRoutes(context.Background(), grant)
+		routes, err := controller.getAffectedAIGatewayRoutes(context.Background(), "backend-ns")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "failed to list AIGatewayRoutes")
 		require.Nil(t, routes)
 	})
 }
 
-// TestReferenceGrantController_GetAffectedAIGatewayRoutes_WithNonMatchingFrom tests getAffectedAIGatewayRoutes with non-matching From
-func TestReferenceGrantController_GetAffectedAIGatewayRoutes_WithNonMatchingFrom(t *testing.T) {
+// TestReferenceGrantController_Reconcile_GrantRevoked asserts that routes are reconciled when the
+// grant authorizing them is deleted, or narrowed so that it no longer names them. Neither case can be
+// resolved from the grant's own "from" entries, so the lookup is by referenced namespace.
+func TestReferenceGrantController_Reconcile_GrantRevoked(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = gwapiv1b1.Install(scheme)
 	_ = aigv1b1.AddToScheme(scheme)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	aiGatewayRouteChan := make(chan event.GenericEvent, 10)
-	logger := logr.Discard()
-	controller := NewReferenceGrantController(fakeClient, logger, aiGatewayRouteChan)
+	aiGatewayRoute := &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "ai-route", Namespace: "route-ns"},
+		Spec: aigv1b1.AIGatewayRouteSpec{Rules: []aigv1b1.AIGatewayRouteRule{{
+			BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
+				{Name: "backend", Namespace: ptr.To(gwapiv1.Namespace("backend-ns"))},
+			},
+		}}},
+	}
+	mcpRoute := &aigv1b1.MCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-route", Namespace: "route-ns"},
+		Spec: aigv1b1.MCPRouteSpec{BackendRefs: []aigv1b1.MCPRouteBackendRef{{
+			BackendObjectReference: gwapiv1.BackendObjectReference{
+				Name:      "svc-a",
+				Namespace: ptr.To(gwapiv1.Namespace("backend-ns")),
+			},
+		}}},
+	}
+
+	t.Run("grant deleted", func(t *testing.T) {
+		// The grant itself is absent, as it would be after a delete.
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(aiGatewayRoute, mcpRoute).Build()
+		aiGatewayRouteChan := make(chan event.GenericEvent, 10)
+		mcpRouteChan := make(chan event.GenericEvent, 10)
+		controller := NewReferenceGrantController(fakeClient, logr.Discard(), aiGatewayRouteChan, mcpRouteChan)
+
+		_, err := controller.Reconcile(context.Background(), reconcile.Request{
+			NamespacedName: client.ObjectKey{Namespace: "backend-ns", Name: "deleted-grant"},
+		})
+		require.NoError(t, err)
+		require.Len(t, aiGatewayRouteChan, 1)
+		require.Len(t, mcpRouteChan, 1)
+	})
+
+	t.Run("grant narrowed to another namespace", func(t *testing.T) {
+		// The grant still exists but no longer names route-ns.
+		grant := &gwapiv1b1.ReferenceGrant{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-grant", Namespace: "backend-ns"},
+			Spec: gwapiv1b1.ReferenceGrantSpec{
+				From: []gwapiv1b1.ReferenceGrantFrom{
+					{Group: aiServiceBackendGroup, Kind: mcpRouteKind, Namespace: "other-ns"},
+				},
+				To: []gwapiv1b1.ReferenceGrantTo{{Group: coreGroup, Kind: serviceKind}},
+			},
+		}
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(grant, aiGatewayRoute, mcpRoute).Build()
+		aiGatewayRouteChan := make(chan event.GenericEvent, 10)
+		mcpRouteChan := make(chan event.GenericEvent, 10)
+		controller := NewReferenceGrantController(fakeClient, logr.Discard(), aiGatewayRouteChan, mcpRouteChan)
+
+		_, err := controller.Reconcile(context.Background(), reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(grant),
+		})
+		require.NoError(t, err)
+		require.Len(t, aiGatewayRouteChan, 1)
+		require.Len(t, mcpRouteChan, 1)
+	})
+}
+
+func TestReferenceGrantController_Reconcile_MCPRoutes(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gwapiv1b1.Install(scheme)
+	_ = aigv1b1.AddToScheme(scheme)
+
+	mcpRoute := func(name string, ref aigv1b1.MCPRouteBackendRef) *aigv1b1.MCPRoute {
+		return &aigv1b1.MCPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "route-ns"},
+			Spec:       aigv1b1.MCPRouteSpec{BackendRefs: []aigv1b1.MCPRouteBackendRef{ref}},
+		}
+	}
+
+	// Referenced via backendRef.namespace.
+	backendRouteA := mcpRoute("backend-route", aigv1b1.MCPRouteBackendRef{
+		BackendObjectReference: gwapiv1.BackendObjectReference{
+			Name:      "svc-a",
+			Namespace: ptr.To(gwapiv1.Namespace("backend-ns")),
+		},
+	})
+	// Referenced via the credential secretRef.namespace only.
+	secretRoute := mcpRoute("secret-route", aigv1b1.MCPRouteBackendRef{
+		BackendObjectReference: gwapiv1.BackendObjectReference{Name: "svc-b"},
+		SecurityPolicy: &aigv1b1.MCPBackendSecurityPolicy{
+			APIKey: &aigv1b1.MCPBackendAPIKey{SecretRef: &gwapiv1.SecretObjectReference{
+				Name:      "tenant-secret",
+				Namespace: ptr.To(gwapiv1.Namespace("backend-ns")),
+			}},
+		},
+	})
+	// References a different namespace entirely.
+	unrelatedRoute := mcpRoute("unrelated-route", aigv1b1.MCPRouteBackendRef{
+		BackendObjectReference: gwapiv1.BackendObjectReference{
+			Name:      "svc-c",
+			Namespace: ptr.To(gwapiv1.Namespace("other-ns")),
+		},
+	})
 
 	grant := &gwapiv1b1.ReferenceGrant{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-grant",
-			Namespace: "backend-ns",
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-grant", Namespace: "backend-ns"},
 		Spec: gwapiv1b1.ReferenceGrantSpec{
 			From: []gwapiv1b1.ReferenceGrantFrom{
-				{
-					Group:     "wrong.group", // Wrong group
-					Kind:      aiGatewayRouteKind,
-					Namespace: "route-ns",
-				},
+				{Group: aiServiceBackendGroup, Kind: mcpRouteKind, Namespace: "route-ns"},
 			},
-			To: []gwapiv1b1.ReferenceGrantTo{
-				{
-					Group: aiServiceBackendGroup,
-					Kind:  aiServiceBackendKind,
-				},
-			},
+			To: []gwapiv1b1.ReferenceGrantTo{{Group: coreGroup, Kind: serviceKind}},
 		},
 	}
 
-	routes, err := controller.getAffectedAIGatewayRoutes(context.Background(), grant)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(grant, backendRouteA, secretRoute, unrelatedRoute).
+		Build()
+
+	aiGatewayRouteChan := make(chan event.GenericEvent, 10)
+	mcpRouteChan := make(chan event.GenericEvent, 10)
+	controller := NewReferenceGrantController(fakeClient, logr.Discard(), aiGatewayRouteChan, mcpRouteChan)
+
+	result, err := controller.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: client.ObjectKeyFromObject(grant),
+	})
 	require.NoError(t, err)
-	require.Empty(t, routes, "should not return any routes when From doesn't match")
+	require.Equal(t, reconcile.Result{}, result)
+
+	// Both the backendRef and the secretRef routes are affected; the unrelated one is not.
+	require.Empty(t, aiGatewayRouteChan)
+	require.Len(t, mcpRouteChan, 2)
+	var names []string
+	for range 2 {
+		names = append(names, (<-mcpRouteChan).Object.GetName())
+	}
+	require.ElementsMatch(t, []string{"backend-route", "secret-route"}, names)
+}
+
+func TestReferenceGrantController_getAffectedMCPRoutes_OtherNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gwapiv1b1.Install(scheme)
+	_ = aigv1b1.AddToScheme(scheme)
+
+	// A route referencing a namespace other than the grant's must not be reconciled.
+	route := &aigv1b1.MCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-route", Namespace: "route-ns"},
+		Spec: aigv1b1.MCPRouteSpec{BackendRefs: []aigv1b1.MCPRouteBackendRef{{
+			BackendObjectReference: gwapiv1.BackendObjectReference{
+				Name:      "svc-a",
+				Namespace: ptr.To(gwapiv1.Namespace("other-ns")),
+			},
+		}}},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(route).Build()
+	controller := NewReferenceGrantController(fakeClient, logr.Discard(),
+		make(chan event.GenericEvent, 10), make(chan event.GenericEvent, 10))
+
+	routes, err := controller.getAffectedMCPRoutes(context.Background(), "backend-ns")
+	require.NoError(t, err)
+	require.Empty(t, routes)
 }

@@ -14,7 +14,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	gwapiv1b1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 )
@@ -22,13 +21,14 @@ import (
 // ReferenceGrantController implements [reconcile.TypedReconciler] for ReferenceGrant.
 //
 // This controller watches ReferenceGrant resources and triggers reconciliation of
-// affected AIGatewayRoutes when grants are created, updated, or deleted.
+// affected AIGatewayRoutes and MCPRoutes when grants are created, updated, or deleted.
 //
 // Exported for testing purposes.
 type ReferenceGrantController struct {
 	client             client.Client
 	logger             logr.Logger
 	aiGatewayRouteChan chan event.GenericEvent
+	mcpRouteChan       chan event.GenericEvent
 }
 
 // NewReferenceGrantController creates a new [reconcile.TypedReconciler] for ReferenceGrant.
@@ -36,11 +36,13 @@ func NewReferenceGrantController(
 	c client.Client,
 	logger logr.Logger,
 	aiGatewayRouteChan chan event.GenericEvent,
+	mcpRouteChan chan event.GenericEvent,
 ) *ReferenceGrantController {
 	return &ReferenceGrantController{
 		client:             c,
 		logger:             logger,
 		aiGatewayRouteChan: aiGatewayRouteChan,
+		mcpRouteChan:       mcpRouteChan,
 	}
 }
 
@@ -48,24 +50,17 @@ func NewReferenceGrantController(
 func (c *ReferenceGrantController) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	c.logger.Info("Reconciling ReferenceGrant", "namespace", req.Namespace, "name", req.Name)
 
-	var referenceGrant gwapiv1b1.ReferenceGrant
-	if err := c.client.Get(ctx, req.NamespacedName, &referenceGrant); err != nil {
-		if client.IgnoreNotFound(err) == nil {
-			// ReferenceGrant was deleted, need to reconcile affected routes
-			c.logger.Info("ReferenceGrant deleted, reconciling affected AIGatewayRoutes",
-				"namespace", req.Namespace, "name", req.Name)
-			// We can't determine affected routes without the grant object,
-			// so we rely on the AIGatewayRoute controller to handle the validation failure
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{}, err
-	}
+	// Routes are looked up by the namespace they reference rather than by the grant's own "from"
+	// entries. Those entries are unknown once the grant is deleted, and on an update they no longer
+	// name the routes an entry was just removed from — both of which must still be reconciled so a
+	// revoked grant is reflected on their status.
+	targetNamespace := req.Namespace
 
 	// Get all AIGatewayRoutes that might be affected by this ReferenceGrant
-	affectedRoutes, err := c.getAffectedAIGatewayRoutes(ctx, &referenceGrant)
+	affectedRoutes, err := c.getAffectedAIGatewayRoutes(ctx, targetNamespace)
 	if err != nil {
 		c.logger.Error(err, "failed to get affected AIGatewayRoutes",
-			"namespace", referenceGrant.Namespace, "name", referenceGrant.Name)
+			"namespace", req.Namespace, "name", req.Name)
 		return ctrl.Result{}, err
 	}
 
@@ -73,43 +68,89 @@ func (c *ReferenceGrantController) Reconcile(ctx context.Context, req reconcile.
 	for _, route := range affectedRoutes {
 		c.logger.Info("Triggering reconciliation for affected AIGatewayRoute",
 			"route_namespace", route.Namespace, "route_name", route.Name,
-			"grant_namespace", referenceGrant.Namespace, "grant_name", referenceGrant.Name)
+			"grant_namespace", req.Namespace, "grant_name", req.Name)
 		c.aiGatewayRouteChan <- event.GenericEvent{Object: route}
+	}
+
+	// Get all MCPRoutes that might be affected by this ReferenceGrant.
+	affectedMCPRoutes, err := c.getAffectedMCPRoutes(ctx, targetNamespace)
+	if err != nil {
+		c.logger.Error(err, "failed to get affected MCPRoutes",
+			"namespace", req.Namespace, "name", req.Name)
+		return ctrl.Result{}, err
+	}
+
+	// Trigger reconciliation for each affected MCPRoute.
+	for _, route := range affectedMCPRoutes {
+		c.logger.Info("Triggering reconciliation for affected MCPRoute",
+			"route_namespace", route.Namespace, "route_name", route.Name,
+			"grant_namespace", req.Namespace, "grant_name", req.Name)
+		c.mcpRouteChan <- event.GenericEvent{Object: route}
 	}
 
 	return reconcile.Result{}, nil
 }
 
-// getAffectedAIGatewayRoutes returns all AIGatewayRoutes that might be affected by a ReferenceGrant change.
-// This is used to trigger reconciliation when a ReferenceGrant is created, updated, or deleted.
+// getAffectedAIGatewayRoutes returns all AIGatewayRoutes that reference targetNamespace, and are
+// therefore affected by a ReferenceGrant in that namespace being created, updated, or deleted.
 func (c *ReferenceGrantController) getAffectedAIGatewayRoutes(
 	ctx context.Context,
-	grant *gwapiv1b1.ReferenceGrant,
+	targetNamespace string,
 ) ([]*aigv1b1.AIGatewayRoute, error) {
+	var routes aigv1b1.AIGatewayRouteList
+	if err := c.client.List(ctx, &routes); err != nil {
+		return nil, fmt.Errorf("failed to list AIGatewayRoutes: %w", err)
+	}
+
 	var affectedRoutes []*aigv1b1.AIGatewayRoute
-
-	// For each "from" reference in the grant, find AIGatewayRoutes in that namespace
-	// that might reference AIServiceBackends in the grant's namespace
-	for _, from := range grant.Spec.From {
-		if from.Group != aiServiceBackendGroup || from.Kind != aiGatewayRouteKind {
-			continue
-		}
-
-		var routes aigv1b1.AIGatewayRouteList
-		if err := c.client.List(ctx, &routes, client.InNamespace(string(from.Namespace))); err != nil {
-			return nil, fmt.Errorf("failed to list AIGatewayRoutes in namespace %s: %w", from.Namespace, err)
-		}
-
-		// Check if any of these routes reference backends in the grant's namespace
-		for i := range routes.Items {
-			route := &routes.Items[i]
-			if c.routeReferencesNamespace(route, grant.Namespace) {
-				affectedRoutes = append(affectedRoutes, route)
-			}
+	for i := range routes.Items {
+		route := &routes.Items[i]
+		if c.routeReferencesNamespace(route, targetNamespace) {
+			affectedRoutes = append(affectedRoutes, route)
 		}
 	}
 
 	return affectedRoutes, nil
+}
+
+// getAffectedMCPRoutes returns all MCPRoutes that reference targetNamespace, either for a backend or
+// for a credential Secret, and are therefore affected by a ReferenceGrant change in that namespace.
+func (c *ReferenceGrantController) getAffectedMCPRoutes(
+	ctx context.Context,
+	targetNamespace string,
+) ([]*aigv1b1.MCPRoute, error) {
+	var routes aigv1b1.MCPRouteList
+	if err := c.client.List(ctx, &routes); err != nil {
+		return nil, fmt.Errorf("failed to list MCPRoutes: %w", err)
+	}
+
+	var affectedRoutes []*aigv1b1.MCPRoute
+	for i := range routes.Items {
+		route := &routes.Items[i]
+		if c.mcpRouteReferencesNamespace(route, targetNamespace) {
+			affectedRoutes = append(affectedRoutes, route)
+		}
+	}
+
+	return affectedRoutes, nil
+}
+
+// mcpRouteReferencesNamespace checks if an MCPRoute has any backend or credential Secret reference
+// to a specific namespace.
+func (c *ReferenceGrantController) mcpRouteReferencesNamespace(route *aigv1b1.MCPRoute, namespace string) bool {
+	for i := range route.Spec.BackendRefs {
+		ref := &route.Spec.BackendRefs[i]
+		if ref.Namespace != nil && string(*ref.Namespace) == namespace {
+			return true
+		}
+		if ref.SecurityPolicy == nil || ref.SecurityPolicy.APIKey == nil || ref.SecurityPolicy.APIKey.SecretRef == nil {
+			continue
+		}
+		if secretNs := ref.SecurityPolicy.APIKey.SecretRef.Namespace; secretNs != nil && string(*secretNs) == namespace {
+			return true
+		}
+	}
+	return false
 }
 
 // routeReferencesNamespace checks if an AIGatewayRoute has any backend references to a specific namespace.
