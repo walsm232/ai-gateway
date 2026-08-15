@@ -7,7 +7,6 @@ package e2e
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -75,6 +74,8 @@ func TestCrossNamespace(t *testing.T) {
 // TestCrossNamespaceMCPRoute tests MCPRoute with cross-namespace references.
 // This test validates that:
 //  1. A Gateway in one namespace (mcp-gw) can be referenced by an MCPRoute in another namespace (mcp-tenant)
+//  2. A backend MCP server in a third namespace (mcp-backend-ns) is aggregated into the same route when
+//     that namespace grants both MCPRoute and the generated HTTPRoute via a ReferenceGrant
 func TestCrossNamespaceMCPRoute(t *testing.T) {
 	const manifest = "testdata/cross_namespace_mcproute.yaml"
 	require.NoError(t, e2elib.KubectlApplyManifest(t.Context(), manifest))
@@ -88,20 +89,11 @@ func TestCrossNamespaceMCPRoute(t *testing.T) {
 	defer fwd.Kill()
 	client := mcp.NewClient(&mcp.Implementation{Name: "demo-http-client", Version: "0.1.0"}, nil)
 
-	require.Eventually(t, func() bool {
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-		defer cancel()
-		var err error
-		sess, err := client.Connect(
-			ctx,
-			&mcp.StreamableClientTransport{
-				Endpoint: fmt.Sprintf("%s/mcp/cross-ns", fwd.Address()),
-			}, nil)
-		if err != nil {
-			t.Logf("failed to connect to MCP server: %v", err)
-			return false
-		}
-		defer sess.Close()
-		return true
-	}, 40*time.Second, 3*time.Second, "failed to connect to MCP server")
+	// Tools from both the same-namespace and the cross-namespace backend must be aggregated,
+	// and calling one must actually reach the backend.
+	expectedTools := append(
+		testMCPServerAllToolNames("mcp-backend-tenant__"),
+		testMCPServerAllToolNames("mcp-backend-remote__")...,
+	)
+	testMCPRouteTools(t.Context(), t, client, fwd.Address(), "/mcp/cross-ns", expectedTools, nil, true, true)
 }
