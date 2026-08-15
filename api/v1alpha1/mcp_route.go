@@ -88,8 +88,10 @@ type MCPRouteSpec struct {
 	// and the Envoy AI Gateway will route the requests to the appropriate MCP server based on the requests.
 	//
 	// All names must be unique within this list to avoid potential tools, resources, etc. name collisions.
-	// Also, cross-namespace references are not supported. In other words, the backend MCP servers must be in the
-	// same namespace as the MCPRoute.
+	//
+	// The namespace of each backend defaults to the MCPRoute's namespace. Referencing a backend in
+	// another namespace requires a ReferenceGrant there allowing both MCPRoute and HTTPRoute from the
+	// MCPRoute's namespace, since the route is programmed through a generated HTTPRoute.
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
@@ -225,6 +227,10 @@ type MCPBackendSecurityPolicy struct {
 type MCPBackendAPIKey struct {
 	// secretRef is the Kubernetes secret which contains the API keys.
 	// The key of the secret should be "apiKey".
+	//
+	// A Secret in another namespace requires a ReferenceGrant there allowing MCPRoute from the
+	// MCPRoute's namespace. Its value is copied into a controller-managed Secret in the MCPRoute's
+	// namespace, which is what gets injected.
 	// +optional
 	SecretRef *gwapiv1.SecretObjectReference `json:"secretRef,omitempty"`
 

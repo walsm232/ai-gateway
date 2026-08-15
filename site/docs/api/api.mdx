@@ -1849,7 +1849,7 @@ When both `header` and `queryParam` are unspecified, the API key will be injecte
   name="secretRef"
   type="[SecretObjectReference](https://gateway-api.sigs.k8s.io/references/spec/#gateway.networking.k8s.io/v1.SecretObjectReference)"
   required="false"
-  description="secretRef is the Kubernetes secret which contains the API keys.<br />The key of the secret should be `apiKey`."
+  description="secretRef is the Kubernetes secret which contains the API keys.<br />The key of the secret should be `apiKey`.<br />A Secret in another namespace requires a ReferenceGrant there allowing MCPRoute from the<br />MCPRoute's namespace. Its value is copied into a controller-managed Secret in the MCPRoute's<br />namespace, which is what gets injected."
 /><ApiField
   name="inline"
   type="string"
@@ -2213,7 +2213,7 @@ MCPRouteSpec details the MCPRoute configuration.
   name="backendRefs"
   type="[MCPRouteBackendRef](#github-com-envoyproxy-ai-gateway-api-v1alpha1-mcproutebackendref) array"
   required="true"
-  description="BackendRefs is a list of backend references to the MCP servers.<br />These MCP servers will be aggregated and exposed as a single MCP endpoint to the clients.<br />From the client's perspective, they only need to configure a single MCP server URL, e.g. `https://api.example.com/mcp`,<br />and the Envoy AI Gateway will route the requests to the appropriate MCP server based on the requests.<br />All names must be unique within this list to avoid potential tools, resources, etc. name collisions.<br />Also, cross-namespace references are not supported. In other words, the backend MCP servers must be in the<br />same namespace as the MCPRoute."
+  description="BackendRefs is a list of backend references to the MCP servers.<br />These MCP servers will be aggregated and exposed as a single MCP endpoint to the clients.<br />From the client's perspective, they only need to configure a single MCP server URL, e.g. `https://api.example.com/mcp`,<br />and the Envoy AI Gateway will route the requests to the appropriate MCP server based on the requests.<br />All names must be unique within this list to avoid potential tools, resources, etc. name collisions.<br />The namespace of each backend defaults to the MCPRoute's namespace. Referencing a backend in<br />another namespace requires a ReferenceGrant there allowing both MCPRoute and HTTPRoute from the<br />MCPRoute's namespace, since the route is programmed through a generated HTTPRoute."
 /><ApiField
   name="securityPolicy"
   type="[MCPRouteSecurityPolicy](#github-com-envoyproxy-ai-gateway-api-v1alpha1-mcproutesecuritypolicy)"
@@ -4468,7 +4468,7 @@ When both `header` and `queryParam` are unspecified, the API key will be injecte
   name="secretRef"
   type="[SecretObjectReference](https://gateway-api.sigs.k8s.io/references/spec/#gateway.networking.k8s.io/v1.SecretObjectReference)"
   required="false"
-  description="secretRef is the Kubernetes secret which contains the API keys.<br />The key of the secret should be `apiKey`."
+  description="secretRef is the Kubernetes secret which contains the API keys.<br />The key of the secret should be `apiKey`.<br />A Secret in another namespace requires a ReferenceGrant there allowing MCPRoute from the<br />MCPRoute's namespace. Its value is copied into a controller-managed Secret in the MCPRoute's<br />namespace, which is what gets injected."
 /><ApiField
   name="inline"
   type="string"
@@ -4832,7 +4832,7 @@ MCPRouteSpec details the MCPRoute configuration.
   name="backendRefs"
   type="[MCPRouteBackendRef](#github-com-envoyproxy-ai-gateway-api-v1beta1-mcproutebackendref) array"
   required="true"
-  description="BackendRefs is a list of backend references to the MCP servers.<br />These MCP servers will be aggregated and exposed as a single MCP endpoint to the clients.<br />From the client's perspective, they only need to configure a single MCP server URL, e.g. `https://api.example.com/mcp`,<br />and the Envoy AI Gateway will route the requests to the appropriate MCP server based on the requests.<br />All names must be unique within this list to avoid potential tools, resources, etc. name collisions.<br />Also, cross-namespace references are not supported. In other words, the backend MCP servers must be in the<br />same namespace as the MCPRoute."
+  description="BackendRefs is a list of backend references to the MCP servers.<br />These MCP servers will be aggregated and exposed as a single MCP endpoint to the clients.<br />From the client's perspective, they only need to configure a single MCP server URL, e.g. `https://api.example.com/mcp`,<br />and the Envoy AI Gateway will route the requests to the appropriate MCP server based on the requests.<br />All names must be unique within this list to avoid potential tools, resources, etc. name collisions.<br />The namespace of each backend defaults to the MCPRoute's namespace. Referencing a backend in<br />another namespace requires a ReferenceGrant there allowing both MCPRoute and HTTPRoute from the<br />MCPRoute's namespace, since the route is programmed through a generated HTTPRoute."
 /><ApiField
   name="securityPolicy"
   type="[MCPRouteSecurityPolicy](#github-com-envoyproxy-ai-gateway-api-v1beta1-mcproutesecuritypolicy)"
