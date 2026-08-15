@@ -210,6 +210,64 @@ Clients will see all tools with prefixed names:
 - `context7__resolve-library-id`
 - `context7__query-docs`
 
+### Cross-Namespace Backends
+
+Backends may live in a different namespace than the MCPRoute, which lets teams own their MCP servers
+end to end without needing write access to the namespace that hosts the route. Set the `namespace`
+field on the backend reference:
+
+```yaml
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: MCPRoute
+metadata:
+  name: mcp-unified
+  namespace: mcp-system
+spec:
+  backendRefs:
+    - name: team-a-mcp
+      namespace: team-a
+      kind: Backend
+      group: gateway.envoyproxy.io
+```
+
+The owner of the target namespace must accept the reference with a
+[ReferenceGrant](https://gateway-api.sigs.k8s.io/reference/api-types/referencegrant/). Two kinds must be
+allowed: `MCPRoute`, which Envoy AI Gateway validates, and `HTTPRoute`, because the MCPRoute is
+programmed through an HTTPRoute generated in the MCPRoute's namespace and Envoy Gateway validates
+that reference separately. Both belong in a single grant in the target namespace:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-mcp-system
+  namespace: team-a
+spec:
+  from:
+    - group: aigateway.envoyproxy.io
+      kind: MCPRoute
+      namespace: mcp-system
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: mcp-system
+  to:
+    - group: gateway.envoyproxy.io
+      kind: Backend
+```
+
+Use `group: ""` and `kind: Service` in `to` when the backend is a Service rather than an Envoy
+Gateway Backend. Adding `name:` to a `to` entry narrows the grant to that single resource; leaving it
+out grants every resource of that kind in the namespace.
+
+Both grants are validated before the route is programmed, so a missing or too-narrow grant shows up
+as a `NotAccepted` status condition on the MCPRoute naming the namespace that must issue it, rather
+than as a routing failure at request time.
+
+A backend's `securityPolicy.apiKey.secretRef` may also name another namespace, which requires a
+grant to `kind: Secret` in that namespace — only from `MCPRoute`, since no generated resource
+references the Secret. Note that the gateway copies the resolved credential into a controller-managed
+Secret in the MCPRoute's namespace, since that is where the filter injecting it lives.
+
 ### Header Forwarding
 
 Forward HTTP headers from the client request to specific backend MCP servers. This enables per-user authentication passthrough (e.g., personal access tokens) without requiring OAuth:
