@@ -34,7 +34,7 @@ const (
 // errReferenceNotPermitted is wrapped into the error returned when no ReferenceGrant authorizes a
 // cross-namespace reference. Callers match on it to tell an actual denial apart from a transient
 // failure to evaluate the grants: only a denial may deprogram resources that were previously
-// authorized. Its text is a fragment of that message rather than a standalone sentence.
+// authorized.
 var errReferenceNotPermitted = errors.New("not permitted")
 
 // referenceSource identifies the kind of resource that makes a cross-namespace reference, i.e. what a
@@ -133,12 +133,12 @@ func (v *referenceGrantValidator) validateInferencePoolReference(
 	return v.validateReference(ctx, aiGatewayRouteSource, routeNamespace, poolNamespace, poolName, inferencePoolGroup, inferencePoolKind)
 }
 
-// validateReference validates that a resource identified by from can reference a target resource
+// validateReference validates that a resource identified by source can reference a target resource
 // (identified by targetGroup/targetKind/targetName) in a different namespace by checking for a valid
 // ReferenceGrant.
 func (v *referenceGrantValidator) validateReference(
 	ctx context.Context,
-	from referenceSource,
+	source referenceSource,
 	routeNamespace string,
 	targetNamespace string,
 	targetName string,
@@ -162,7 +162,7 @@ func (v *referenceGrantValidator) validateReference(
 	// Check if any ReferenceGrant allows this cross-namespace reference.
 	for i := range referenceGrants.Items {
 		grant := &referenceGrants.Items[i]
-		if v.isReferenceGrantValid(grant, from, routeNamespace, targetName, targetGroup, targetKind) {
+		if v.isReferenceGrantValid(grant, source, routeNamespace, targetName, targetGroup, targetKind) {
 			return nil
 		}
 	}
@@ -171,17 +171,17 @@ func (v *referenceGrantValidator) validateReference(
 		"cross-namespace reference from %s in namespace %s to %s %s in namespace %s is %w: "+
 			"no valid ReferenceGrant found in namespace %s. "+
 			"A ReferenceGrant must allow %s from namespace %s to reference %s %s in namespace %s",
-		from.kind, routeNamespace, targetKind, targetName, targetNamespace, errReferenceNotPermitted,
+		source.kind, routeNamespace, targetKind, targetName, targetNamespace, errReferenceNotPermitted,
 		targetNamespace,
-		from.kind, routeNamespace, targetKind, targetName, targetNamespace,
+		source.kind, routeNamespace, targetKind, targetName, targetNamespace,
 	)
 }
 
-// isReferenceGrantValid checks if a ReferenceGrant allows the resource identified by from to reference
-// the target resource identified by targetGroup/targetKind/targetName.
+// isReferenceGrantValid checks if a ReferenceGrant allows the resource identified by source to
+// reference the target resource identified by targetGroup/targetKind/targetName.
 func (v *referenceGrantValidator) isReferenceGrantValid(
 	grant *gwapiv1b1.ReferenceGrant,
-	from referenceSource,
+	source referenceSource,
 	fromNamespace string,
 	targetName string,
 	targetGroup gwapiv1b1.Group,
@@ -189,8 +189,8 @@ func (v *referenceGrantValidator) isReferenceGrantValid(
 ) bool {
 	// Check if the grant allows references from the route's namespace.
 	fromAllowed := false
-	for _, f := range grant.Spec.From {
-		if v.matchesFrom(&f, from, fromNamespace) {
+	for _, from := range grant.Spec.From {
+		if v.matchesFrom(&from, source, fromNamespace) {
 			fromAllowed = true
 			break
 		}
@@ -211,19 +211,19 @@ func (v *referenceGrantValidator) isReferenceGrantValid(
 }
 
 // matchesFrom checks if a ReferenceGrantFrom matches a reference originating from the given source.
-func (v *referenceGrantValidator) matchesFrom(f *gwapiv1b1.ReferenceGrantFrom, from referenceSource, fromNamespace string) bool {
+func (v *referenceGrantValidator) matchesFrom(from *gwapiv1b1.ReferenceGrantFrom, source referenceSource, fromNamespace string) bool {
 	// Check group
-	if f.Group != from.group {
+	if from.Group != source.group {
 		return false
 	}
 
 	// Check kind
-	if f.Kind != from.kind {
+	if from.Kind != source.kind {
 		return false
 	}
 
 	// Check namespace
-	if f.Namespace != gwapiv1b1.Namespace(fromNamespace) {
+	if from.Namespace != gwapiv1b1.Namespace(fromNamespace) {
 		return false
 	}
 

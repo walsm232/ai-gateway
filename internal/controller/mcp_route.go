@@ -136,8 +136,8 @@ func (c *MCPRouteController) syncMCPRoute(ctx context.Context, mcpRoute *aigv1b1
 	// This allows the MCP proxy to route requests to the correct backend based on the header.
 	//
 	// A denied backend is left in existingPerBackendRoutes so the cleanup below deprograms what a
-	// revoked ReferenceGrant no longer authorizes, and is reported only afterwards. Failing to evaluate
-	// the grants is not a denial and must not tear down backends that are still authorized.
+	// revoked ReferenceGrant no longer authorizes. Failing to evaluate the grants is not a denial and
+	// must not tear down backends that are still authorized.
 	var deniedErr error
 	for i := range mcpRoute.Spec.BackendRefs {
 		ref := &mcpRoute.Spec.BackendRefs[i]
@@ -166,9 +166,6 @@ func (c *MCPRouteController) syncMCPRoute(ctx context.Context, mcpRoute *aigv1b1
 	if err = c.deleteOrphanedPerBackendResources(ctx, mcpRoute, existingPerBackendRoutes); err != nil {
 		return fmt.Errorf("failed to delete orphaned per-backend resources: %w", err)
 	}
-	if deniedErr != nil {
-		return deniedErr
-	}
 
 	// Reconciles MCPRouteSecurityPolicy and creates/updates its associated envoy gateway resources.
 	if err = c.syncMCPRouteSecurityPolicy(ctx, mcpRoute, mainHTTPRouteName); err != nil {
@@ -179,7 +176,9 @@ func (c *MCPRouteController) syncMCPRoute(ctx context.Context, mcpRoute *aigv1b1
 	if err != nil {
 		return fmt.Errorf("failed to sync gw pods: %w", err)
 	}
-	return nil
+	// Reported only after the gateways are synced, so that deprogramming a denied backend reaches the
+	// data plane instead of being skipped by the early return.
+	return deniedErr
 }
 
 func mcpPerBackendRefHTTPRouteName(mcpRouteName string, backendName gwapiv1.ObjectName) string {
@@ -931,7 +930,6 @@ func (c *MCPRouteController) readAPIKey(ctx context.Context, routeNamespace stri
 		if secretRef.Namespace != nil && *secretRef.Namespace != "" {
 			secretNamespace = string(*secretRef.Namespace)
 		}
-		// Not guarded on the namespaces differing: the validation is a no-op for a same-namespace Secret.
 		if err := c.referenceGrantValidator.validateMCPSecretReference(
 			ctx, routeNamespace, secretNamespace, string(secretRef.Name),
 		); err != nil {

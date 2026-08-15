@@ -259,9 +259,9 @@ Use `group: ""` and `kind: Service` in `to` when the backend is a Service rather
 Gateway Backend. Adding `name:` to a `to` entry narrows the grant to that single resource; leaving it
 out grants every resource of that kind in the namespace.
 
-Both grants are validated before the route is programmed, so a missing or too-narrow grant shows up
-as a `NotAccepted` status condition on the MCPRoute naming the namespace that must issue it, rather
-than as a routing failure at request time.
+Each grant is validated before the corresponding backend is programmed, so a missing or too-narrow
+grant shows up as a `NotAccepted` status condition on the MCPRoute naming the namespace that must
+issue it. Backends that remain authorized keep serving.
 
 A backend's `securityPolicy.apiKey.secretRef` may also name another namespace, which requires a
 grant to `kind: Secret` in that namespace — only from `MCPRoute`, since no generated resource

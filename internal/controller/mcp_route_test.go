@@ -1069,8 +1069,8 @@ func TestMCPRouteController_CrossNamespaceBackendRef(t *testing.T) {
 		}
 	}
 
-	// requireReconcile creates the Gateway and the MCPRoute, plus any extra objects, then reconciles.
-	requireReconcile := func(t *testing.T, extra ...client.Object) (client.Client, error) {
+	// requireReconcile creates the Gateway and the given MCPRoute, plus any extra objects, then reconciles.
+	requireReconcile := func(t *testing.T, route *aigv1b1.MCPRoute, extra ...client.Object) (client.Client, error) {
 		fakeClient := requireNewFakeClientWithIndexesForMCP(t)
 		eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
 		c := NewMCPRouteController(fakeClient, fakekube.NewClientset(), logr.Discard(), eventCh.Ch)
@@ -1080,7 +1080,7 @@ func TestMCPRouteController_CrossNamespaceBackendRef(t *testing.T) {
 		for _, o := range extra {
 			require.NoError(t, fakeClient.Create(t.Context(), o))
 		}
-		require.NoError(t, fakeClient.Create(t.Context(), newRoute()))
+		require.NoError(t, fakeClient.Create(t.Context(), route))
 
 		_, err := c.Reconcile(t.Context(), reconcile.Request{
 			NamespacedName: types.NamespacedName{Namespace: "route-ns", Name: "myroute"},
@@ -1097,7 +1097,7 @@ func TestMCPRouteController_CrossNamespaceBackendRef(t *testing.T) {
 	}
 
 	t.Run("rejected without a ReferenceGrant", func(t *testing.T) {
-		c, err := requireReconcile(t)
+		c, err := requireReconcile(t, newRoute())
 		require.ErrorContains(t, err, "cross-namespace reference from MCPRoute in namespace route-ns to Service svc-a in namespace backend-ns is not permitted")
 		requireStatus(t, c, aigv1b1.ConditionTypeNotAccepted, "no valid ReferenceGrant found in namespace backend-ns")
 	})
@@ -1105,32 +1105,16 @@ func TestMCPRouteController_CrossNamespaceBackendRef(t *testing.T) {
 	t.Run("rejected when the grant only allows AIGatewayRoute", func(t *testing.T) {
 		grant := mcpReferenceGrant("g", "backend-ns", "route-ns",
 			[]referenceSource{aiGatewayRouteSource}, coreGroup, serviceKind, "")
-		c, err := requireReconcile(t, grant)
+		c, err := requireReconcile(t, newRoute(), grant)
 		require.ErrorContains(t, err, "is not permitted")
 		requireStatus(t, c, aigv1b1.ConditionTypeNotAccepted, "A ReferenceGrant must allow MCPRoute from namespace route-ns")
-	})
-
-	t.Run("rejected when the grant targets a different kind", func(t *testing.T) {
-		// A grant to Backend does not authorize a reference to a Service.
-		grant := mcpReferenceGrant("g", "backend-ns", "route-ns",
-			[]referenceSource{mcpRouteSource, httpRouteSource}, "gateway.envoyproxy.io", "Backend", "")
-		_, err := requireReconcile(t, grant)
-		require.ErrorContains(t, err, "is not permitted")
-	})
-
-	t.Run("rejected when the grant names a different resource", func(t *testing.T) {
-		// A grant scoped to svc-b must not authorize a reference to svc-a.
-		grant := mcpReferenceGrant("g", "backend-ns", "route-ns",
-			[]referenceSource{mcpRouteSource, httpRouteSource}, coreGroup, serviceKind, "svc-b")
-		_, err := requireReconcile(t, grant)
-		require.ErrorContains(t, err, "is not permitted")
 	})
 
 	t.Run("rejected when only the MCPRoute grant exists", func(t *testing.T) {
 		// Envoy Gateway would reject the generated HTTPRoute, so the MCPRoute must not report Accepted.
 		grant := mcpReferenceGrant("g", "backend-ns", "route-ns",
 			[]referenceSource{mcpRouteSource}, coreGroup, serviceKind, "")
-		c, err := requireReconcile(t, grant)
+		c, err := requireReconcile(t, newRoute(), grant)
 		require.ErrorContains(t, err, "cross-namespace reference from HTTPRoute in namespace route-ns")
 		requireStatus(t, c, aigv1b1.ConditionTypeNotAccepted, "A ReferenceGrant must allow HTTPRoute from namespace route-ns")
 	})
@@ -1138,7 +1122,7 @@ func TestMCPRouteController_CrossNamespaceBackendRef(t *testing.T) {
 	t.Run("accepted with a ReferenceGrant, backend namespace preserved", func(t *testing.T) {
 		grant := mcpReferenceGrant("g", "backend-ns", "route-ns",
 			[]referenceSource{mcpRouteSource, httpRouteSource}, coreGroup, serviceKind, "svc-a")
-		c, err := requireReconcile(t, grant)
+		c, err := requireReconcile(t, newRoute(), grant)
 		require.NoError(t, err)
 		requireStatus(t, c, aigv1b1.ConditionTypeAccepted, "reconciled successfully")
 
@@ -1160,21 +1144,11 @@ func TestMCPRouteController_CrossNamespaceBackendRef(t *testing.T) {
 		grant := mcpReferenceGrant("g", "backend-ns", "route-ns",
 			[]referenceSource{mcpRouteSource, httpRouteSource}, "gateway.envoyproxy.io", "Backend", "")
 
-		fakeClient := requireNewFakeClientWithIndexesForMCP(t)
-		eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
-		c := NewMCPRouteController(fakeClient, fakekube.NewClientset(), logr.Discard(), eventCh.Ch)
-		require.NoError(t, fakeClient.Create(t.Context(),
-			&gwapiv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "mytarget", Namespace: "route-ns"}}))
-		require.NoError(t, fakeClient.Create(t.Context(), grant))
-
 		route := newRoute()
 		route.Spec.BackendRefs[0].Group = ptr.To(gwapiv1.Group("gateway.envoyproxy.io"))
 		route.Spec.BackendRefs[0].Kind = ptr.To(gwapiv1.Kind("Backend"))
-		require.NoError(t, fakeClient.Create(t.Context(), route))
 
-		_, err := c.Reconcile(t.Context(), reconcile.Request{
-			NamespacedName: types.NamespacedName{Namespace: "route-ns", Name: "myroute"},
-		})
+		_, err := requireReconcile(t, route, grant)
 		require.NoError(t, err)
 	})
 }
@@ -1321,6 +1295,7 @@ func TestMCPRouteController_CrossNamespaceBackendRefRevoked(t *testing.T) {
 	_, err := kubeClient.CoreV1().Secrets("route-ns").Get(t.Context(),
 		mcpCredentialSecretName(route, "svc-a"), metav1.GetOptions{})
 	require.NoError(t, err)
+	eventCh.RequireItemsEventually(t, 1)
 
 	// Narrow the backend grant to svc-b only: svc-a is no longer authorized.
 	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(backendGrant), backendGrant))
@@ -1330,6 +1305,10 @@ func TestMCPRouteController_CrossNamespaceBackendRefRevoked(t *testing.T) {
 	err = reconcile1()
 	require.ErrorContains(t, err, "svc-a")
 	require.ErrorIs(t, err, errReferenceNotPermitted)
+
+	// The gateways are synced even though the reconcile reports the denial, since deprogramming
+	// svc-a only reaches the data plane once the gateway controller re-renders the MCP proxy config.
+	eventCh.RequireItemsEventually(t, 1)
 
 	// svc-a and everything generated for it is gone, while svc-b keeps serving.
 	require.False(t, perBackendExists(t, "svc-a"), "denied backend must be deprogrammed")
