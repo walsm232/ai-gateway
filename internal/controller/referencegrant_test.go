@@ -400,7 +400,7 @@ func TestReferenceGrantValidator_MatchesFrom_WrongGroup(t *testing.T) {
 		Namespace: "route-ns",
 	}
 
-	result := validator.matchesFrom(from, "route-ns")
+	result := validator.matchesFrom(from, aiGatewayRouteSource, "route-ns")
 	require.False(t, result, "should return false for wrong group")
 }
 
@@ -419,7 +419,7 @@ func TestReferenceGrantValidator_MatchesFrom_WrongKind(t *testing.T) {
 		Namespace: "route-ns",
 	}
 
-	result := validator.matchesFrom(from, "route-ns")
+	result := validator.matchesFrom(from, aiGatewayRouteSource, "route-ns")
 	require.False(t, result, "should return false for wrong kind")
 }
 
@@ -438,7 +438,7 @@ func TestReferenceGrantValidator_MatchesFrom_WrongNamespace(t *testing.T) {
 		Namespace: "wrong-ns",
 	}
 
-	result := validator.matchesFrom(from, "route-ns")
+	result := validator.matchesFrom(from, aiGatewayRouteSource, "route-ns")
 	require.False(t, result, "should return false for wrong namespace")
 }
 
@@ -456,7 +456,7 @@ func TestReferenceGrantValidator_MatchesTo_WrongGroup(t *testing.T) {
 		Kind:  aiServiceBackendKind,
 	}
 
-	result := validator.matchesTo(to, aiServiceBackendGroup, aiServiceBackendKind)
+	result := validator.matchesTo(to, "some-backend", aiServiceBackendGroup, aiServiceBackendKind)
 	require.False(t, result, "should return false for wrong group")
 }
 
@@ -474,7 +474,7 @@ func TestReferenceGrantValidator_MatchesTo_WrongKind(t *testing.T) {
 		Kind:  "WrongKind",
 	}
 
-	result := validator.matchesTo(to, aiServiceBackendGroup, aiServiceBackendKind)
+	result := validator.matchesTo(to, "some-backend", aiServiceBackendGroup, aiServiceBackendKind)
 	require.False(t, result, "should return false for wrong kind")
 }
 
