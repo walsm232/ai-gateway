@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1b1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
@@ -1026,4 +1027,324 @@ func TestMCPRouteController_Reconcile_DeletionWithMissingGateway(t *testing.T) {
 	} else {
 		require.True(t, apierrors.IsNotFound(err))
 	}
+}
+
+// mcpReferenceGrant builds a ReferenceGrant in targetNamespace accepting references from the given
+// sources in routeNamespace to the given target group/kind. A non-empty toName scopes the grant to
+// that single resource.
+func mcpReferenceGrant(name, targetNamespace, routeNamespace string, sources []referenceSource,
+	toGroup gwapiv1b1.Group, toKind gwapiv1b1.Kind, toName string,
+) *gwapiv1b1.ReferenceGrant {
+	to := gwapiv1b1.ReferenceGrantTo{Group: toGroup, Kind: toKind}
+	if toName != "" {
+		to.Name = ptr.To(gwapiv1b1.ObjectName(toName))
+	}
+	grant := &gwapiv1b1.ReferenceGrant{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: targetNamespace},
+		Spec:       gwapiv1b1.ReferenceGrantSpec{To: []gwapiv1b1.ReferenceGrantTo{to}},
+	}
+	for _, s := range sources {
+		grant.Spec.From = append(grant.Spec.From, gwapiv1b1.ReferenceGrantFrom{
+			Group:     s.group,
+			Kind:      s.kind,
+			Namespace: gwapiv1b1.Namespace(routeNamespace),
+		})
+	}
+	return grant
+}
+
+func TestMCPRouteController_CrossNamespaceBackendRef(t *testing.T) {
+	newRoute := func() *aigv1b1.MCPRoute {
+		return &aigv1b1.MCPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "myroute", Namespace: "route-ns"},
+			Spec: aigv1b1.MCPRouteSpec{
+				ParentRefs: []gwapiv1.ParentReference{{Name: gwapiv1.ObjectName("mytarget")}},
+				BackendRefs: []aigv1b1.MCPRouteBackendRef{{
+					BackendObjectReference: gwapiv1.BackendObjectReference{
+						Name:      "svc-a",
+						Namespace: ptr.To(gwapiv1.Namespace("backend-ns")),
+					},
+				}},
+			},
+		}
+	}
+
+	// requireReconcile creates the Gateway and the MCPRoute, plus any extra objects, then reconciles.
+	requireReconcile := func(t *testing.T, extra ...client.Object) (client.Client, error) {
+		fakeClient := requireNewFakeClientWithIndexesForMCP(t)
+		eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+		c := NewMCPRouteController(fakeClient, fakekube.NewClientset(), logr.Discard(), eventCh.Ch)
+
+		require.NoError(t, fakeClient.Create(t.Context(),
+			&gwapiv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "mytarget", Namespace: "route-ns"}}))
+		for _, o := range extra {
+			require.NoError(t, fakeClient.Create(t.Context(), o))
+		}
+		require.NoError(t, fakeClient.Create(t.Context(), newRoute()))
+
+		_, err := c.Reconcile(t.Context(), reconcile.Request{
+			NamespacedName: types.NamespacedName{Namespace: "route-ns", Name: "myroute"},
+		})
+		return fakeClient, err
+	}
+
+	requireStatus := func(t *testing.T, c client.Client, conditionType, msgContains string) {
+		var current aigv1b1.MCPRoute
+		require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "route-ns", Name: "myroute"}, &current))
+		require.Len(t, current.Status.Conditions, 1)
+		require.Equal(t, conditionType, current.Status.Conditions[0].Type)
+		require.Contains(t, current.Status.Conditions[0].Message, msgContains)
+	}
+
+	t.Run("rejected without a ReferenceGrant", func(t *testing.T) {
+		c, err := requireReconcile(t)
+		require.ErrorContains(t, err, "cross-namespace reference from MCPRoute in namespace route-ns to Service svc-a in namespace backend-ns is not permitted")
+		requireStatus(t, c, aigv1b1.ConditionTypeNotAccepted, "no valid ReferenceGrant found in namespace backend-ns")
+	})
+
+	t.Run("rejected when the grant only allows AIGatewayRoute", func(t *testing.T) {
+		grant := mcpReferenceGrant("g", "backend-ns", "route-ns",
+			[]referenceSource{aiGatewayRouteSource}, coreGroup, serviceKind, "")
+		c, err := requireReconcile(t, grant)
+		require.ErrorContains(t, err, "is not permitted")
+		requireStatus(t, c, aigv1b1.ConditionTypeNotAccepted, "A ReferenceGrant must allow MCPRoute from namespace route-ns")
+	})
+
+	t.Run("rejected when the grant targets a different kind", func(t *testing.T) {
+		// A grant to Backend does not authorize a reference to a Service.
+		grant := mcpReferenceGrant("g", "backend-ns", "route-ns",
+			[]referenceSource{mcpRouteSource, httpRouteSource}, "gateway.envoyproxy.io", "Backend", "")
+		_, err := requireReconcile(t, grant)
+		require.ErrorContains(t, err, "is not permitted")
+	})
+
+	t.Run("rejected when the grant names a different resource", func(t *testing.T) {
+		// A grant scoped to svc-b must not authorize a reference to svc-a.
+		grant := mcpReferenceGrant("g", "backend-ns", "route-ns",
+			[]referenceSource{mcpRouteSource, httpRouteSource}, coreGroup, serviceKind, "svc-b")
+		_, err := requireReconcile(t, grant)
+		require.ErrorContains(t, err, "is not permitted")
+	})
+
+	t.Run("rejected when only the MCPRoute grant exists", func(t *testing.T) {
+		// Envoy Gateway would reject the generated HTTPRoute, so the MCPRoute must not report Accepted.
+		grant := mcpReferenceGrant("g", "backend-ns", "route-ns",
+			[]referenceSource{mcpRouteSource}, coreGroup, serviceKind, "")
+		c, err := requireReconcile(t, grant)
+		require.ErrorContains(t, err, "cross-namespace reference from HTTPRoute in namespace route-ns")
+		requireStatus(t, c, aigv1b1.ConditionTypeNotAccepted, "A ReferenceGrant must allow HTTPRoute from namespace route-ns")
+	})
+
+	t.Run("accepted with a ReferenceGrant, backend namespace preserved", func(t *testing.T) {
+		grant := mcpReferenceGrant("g", "backend-ns", "route-ns",
+			[]referenceSource{mcpRouteSource, httpRouteSource}, coreGroup, serviceKind, "svc-a")
+		c, err := requireReconcile(t, grant)
+		require.NoError(t, err)
+		requireStatus(t, c, aigv1b1.ConditionTypeAccepted, "reconciled successfully")
+
+		// The generated per-backend HTTPRoute lives in the MCPRoute's namespace but must carry the
+		// backend's namespace through, so that Envoy Gateway resolves the cross-namespace backend.
+		var httpRoute gwapiv1.HTTPRoute
+		require.NoError(t, c.Get(t.Context(), client.ObjectKey{
+			Namespace: "route-ns",
+			Name:      mcpPerBackendRefHTTPRouteName("myroute", "svc-a"),
+		}, &httpRoute))
+		require.Len(t, httpRoute.Spec.Rules, 1)
+		require.Len(t, httpRoute.Spec.Rules[0].BackendRefs, 1)
+		ref := httpRoute.Spec.Rules[0].BackendRefs[0]
+		require.Equal(t, gwapiv1.ObjectName("svc-a"), ref.Name)
+		require.Equal(t, ptr.To(gwapiv1.Namespace("backend-ns")), ref.Namespace)
+	})
+
+	t.Run("accepted for an Envoy Gateway Backend in another namespace", func(t *testing.T) {
+		grant := mcpReferenceGrant("g", "backend-ns", "route-ns",
+			[]referenceSource{mcpRouteSource, httpRouteSource}, "gateway.envoyproxy.io", "Backend", "")
+
+		fakeClient := requireNewFakeClientWithIndexesForMCP(t)
+		eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+		c := NewMCPRouteController(fakeClient, fakekube.NewClientset(), logr.Discard(), eventCh.Ch)
+		require.NoError(t, fakeClient.Create(t.Context(),
+			&gwapiv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "mytarget", Namespace: "route-ns"}}))
+		require.NoError(t, fakeClient.Create(t.Context(), grant))
+
+		route := newRoute()
+		route.Spec.BackendRefs[0].Group = ptr.To(gwapiv1.Group("gateway.envoyproxy.io"))
+		route.Spec.BackendRefs[0].Kind = ptr.To(gwapiv1.Kind("Backend"))
+		require.NoError(t, fakeClient.Create(t.Context(), route))
+
+		_, err := c.Reconcile(t.Context(), reconcile.Request{
+			NamespacedName: types.NamespacedName{Namespace: "route-ns", Name: "myroute"},
+		})
+		require.NoError(t, err)
+	})
+}
+
+func TestMCPRouteController_CrossNamespaceAPIKeySecretRef(t *testing.T) {
+	const secretNamespace = "backend-ns"
+	newKubeClient := func() *fakekube.Clientset {
+		return fakekube.NewClientset(&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "tenant-secret", Namespace: secretNamespace},
+			Data:       map[string][]byte{"apiKey": []byte("tenant-value")},
+		})
+	}
+	backendRef := func() *aigv1b1.MCPRouteBackendRef {
+		return &aigv1b1.MCPRouteBackendRef{
+			BackendObjectReference: gwapiv1.BackendObjectReference{
+				Name:      "svc-a",
+				Namespace: ptr.To(gwapiv1.Namespace("route-ns")),
+			},
+			SecurityPolicy: &aigv1b1.MCPBackendSecurityPolicy{
+				APIKey: &aigv1b1.MCPBackendAPIKey{SecretRef: &gwapiv1.SecretObjectReference{
+					Name:      "tenant-secret",
+					Namespace: ptr.To(gwapiv1.Namespace(secretNamespace)),
+				}},
+			},
+		}
+	}
+	mcpRoute := &aigv1b1.MCPRoute{ObjectMeta: metav1.ObjectMeta{Name: "route-a", Namespace: "route-ns"}}
+
+	t.Run("rejected without a ReferenceGrant", func(t *testing.T) {
+		c := requireNewFakeClientWithIndexesForMCP(t)
+		eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+		ctrlr := NewMCPRouteController(c, newKubeClient(), logr.Discard(), eventCh.Ch)
+
+		_, err := ctrlr.mcpBackendRefToHTTPRouteRule(t.Context(), mcpRoute, backendRef())
+		require.ErrorContains(t, err, "cross-namespace reference from MCPRoute in namespace route-ns to Secret tenant-secret in namespace backend-ns is not permitted")
+	})
+
+	t.Run("rejected when the grant names a different Secret", func(t *testing.T) {
+		c := requireNewFakeClientWithIndexesForMCP(t)
+		require.NoError(t, c.Create(t.Context(), mcpReferenceGrant("g", secretNamespace, "route-ns",
+			[]referenceSource{mcpRouteSource}, coreGroup, secretKind, "other-secret")))
+		eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+		ctrlr := NewMCPRouteController(c, newKubeClient(), logr.Discard(), eventCh.Ch)
+
+		_, err := ctrlr.mcpBackendRefToHTTPRouteRule(t.Context(), mcpRoute, backendRef())
+		require.ErrorContains(t, err, "is not permitted")
+	})
+
+	t.Run("accepted with a ReferenceGrant to Secret", func(t *testing.T) {
+		c := requireNewFakeClientWithIndexesForMCP(t)
+		require.NoError(t, c.Create(t.Context(), mcpReferenceGrant("g", secretNamespace, "route-ns",
+			[]referenceSource{mcpRouteSource}, coreGroup, secretKind, "tenant-secret")))
+		eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+		kubeClient := newKubeClient()
+		ctrlr := NewMCPRouteController(c, kubeClient, logr.Discard(), eventCh.Ch)
+
+		_, err := ctrlr.mcpBackendRefToHTTPRouteRule(t.Context(), mcpRoute, backendRef())
+		require.NoError(t, err)
+
+		// The credential is copied into a managed Secret in the MCPRoute's namespace, since that is
+		// where the HTTPRouteFilter referencing it lives.
+		credential, err := kubeClient.CoreV1().Secrets("route-ns").Get(t.Context(),
+			mcpCredentialSecretName(mcpRoute, "svc-a"), metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, "Bearer tenant-value", string(credential.Data[egv1a1.InjectedCredentialKey]))
+	})
+}
+
+// TestMCPRouteController_CrossNamespaceBackendRefRevoked asserts that narrowing a ReferenceGrant
+// deprograms the backend it no longer authorizes, rather than leaving the generated resources live.
+func TestMCPRouteController_CrossNamespaceBackendRefRevoked(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexesForMCP(t)
+	eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+	kubeClient := fakekube.NewClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "tenant-secret", Namespace: "backend-ns"},
+		Data:       map[string][]byte{"apiKey": []byte("tenant-value")},
+	})
+	c := NewMCPRouteController(fakeClient, kubeClient, logr.Discard(), eventCh.Ch)
+
+	require.NoError(t, fakeClient.Create(t.Context(),
+		&gwapiv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "mytarget", Namespace: "route-ns"}}))
+	backendGrant := mcpReferenceGrant("backends", "backend-ns", "route-ns",
+		[]referenceSource{mcpRouteSource, httpRouteSource}, coreGroup, serviceKind, "")
+	require.NoError(t, fakeClient.Create(t.Context(), backendGrant))
+	require.NoError(t, fakeClient.Create(t.Context(), mcpReferenceGrant("secrets", "backend-ns", "route-ns",
+		[]referenceSource{mcpRouteSource}, coreGroup, secretKind, "")))
+
+	// Two cross-namespace backends, one of them with a cross-namespace credential Secret.
+	route := &aigv1b1.MCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "myroute", Namespace: "route-ns"},
+		Spec: aigv1b1.MCPRouteSpec{
+			ParentRefs: []gwapiv1.ParentReference{{Name: gwapiv1.ObjectName("mytarget")}},
+			BackendRefs: []aigv1b1.MCPRouteBackendRef{
+				{
+					BackendObjectReference: gwapiv1.BackendObjectReference{
+						Name:      "svc-a",
+						Namespace: ptr.To(gwapiv1.Namespace("backend-ns")),
+					},
+					SecurityPolicy: &aigv1b1.MCPBackendSecurityPolicy{
+						APIKey: &aigv1b1.MCPBackendAPIKey{SecretRef: &gwapiv1.SecretObjectReference{
+							Name:      "tenant-secret",
+							Namespace: ptr.To(gwapiv1.Namespace("backend-ns")),
+						}},
+					},
+				},
+				{
+					BackendObjectReference: gwapiv1.BackendObjectReference{
+						Name:      "svc-b",
+						Namespace: ptr.To(gwapiv1.Namespace("backend-ns")),
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), route))
+
+	reconcile1 := func() error {
+		_, err := c.Reconcile(t.Context(), reconcile.Request{
+			NamespacedName: types.NamespacedName{Namespace: "route-ns", Name: "myroute"},
+		})
+		return err
+	}
+
+	perBackendExists := func(t *testing.T, backend gwapiv1.ObjectName) bool {
+		var httpRoute gwapiv1.HTTPRoute
+		err := fakeClient.Get(t.Context(), client.ObjectKey{
+			Namespace: "route-ns", Name: mcpPerBackendRefHTTPRouteName("myroute", backend),
+		}, &httpRoute)
+		if apierrors.IsNotFound(err) {
+			return false
+		}
+		require.NoError(t, err)
+		return true
+	}
+
+	// Both backends are programmed while the grant authorizes them.
+	require.NoError(t, reconcile1())
+	require.True(t, perBackendExists(t, "svc-a"))
+	require.True(t, perBackendExists(t, "svc-b"))
+	var filter egv1a1.HTTPRouteFilter
+	require.NoError(t, fakeClient.Get(t.Context(), types.NamespacedName{
+		Namespace: "route-ns", Name: mcpBackendRefFilterName(route, "svc-a"),
+	}, &filter))
+	_, err := kubeClient.CoreV1().Secrets("route-ns").Get(t.Context(),
+		mcpCredentialSecretName(route, "svc-a"), metav1.GetOptions{})
+	require.NoError(t, err)
+
+	// Narrow the backend grant to svc-b only: svc-a is no longer authorized.
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(backendGrant), backendGrant))
+	backendGrant.Spec.To[0].Name = ptr.To(gwapiv1b1.ObjectName("svc-b"))
+	require.NoError(t, fakeClient.Update(t.Context(), backendGrant))
+
+	err = reconcile1()
+	require.ErrorContains(t, err, "svc-a")
+	require.ErrorIs(t, err, errReferenceNotPermitted)
+
+	// svc-a and everything generated for it is gone, while svc-b keeps serving.
+	require.False(t, perBackendExists(t, "svc-a"), "denied backend must be deprogrammed")
+	require.True(t, perBackendExists(t, "svc-b"), "a denied backend must not deprogram the others")
+	err = fakeClient.Get(t.Context(), types.NamespacedName{
+		Namespace: "route-ns", Name: mcpBackendRefFilterName(route, "svc-a"),
+	}, &filter)
+	require.True(t, apierrors.IsNotFound(err), "HTTPRouteFilter for the denied backend must be deleted")
+	_, err = kubeClient.CoreV1().Secrets("route-ns").Get(t.Context(),
+		mcpCredentialSecretName(route, "svc-a"), metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err), "copied credential Secret for the denied backend must be deleted")
+
+	// The route reports NotAccepted naming the denied backend.
+	var current aigv1b1.MCPRoute
+	require.NoError(t, fakeClient.Get(t.Context(), types.NamespacedName{Namespace: "route-ns", Name: "myroute"}, &current))
+	require.Equal(t, aigv1b1.ConditionTypeNotAccepted, current.Status.Conditions[0].Type)
+	require.Contains(t, current.Status.Conditions[0].Message, "svc-a")
 }

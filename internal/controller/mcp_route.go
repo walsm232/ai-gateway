@@ -7,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -24,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1b1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
@@ -45,6 +47,8 @@ type MCPRouteController struct {
 	logger logr.Logger
 	// gatewayEventChan is a channel to send events to the gateway controller.
 	gatewayEventChan chan event.GenericEvent
+	// referenceGrantValidator validates cross-namespace references using ReferenceGrant.
+	referenceGrantValidator *referenceGrantValidator
 }
 
 // NewMCPRouteController creates a new reconcile.TypedReconciler[reconcile.Request] for the MCPRoute resource.
@@ -53,10 +57,11 @@ func NewMCPRouteController(
 	gatewayEventChan chan event.GenericEvent,
 ) *MCPRouteController {
 	return &MCPRouteController{
-		client:           client,
-		kube:             kube,
-		logger:           logger,
-		gatewayEventChan: gatewayEventChan,
+		client:                  client,
+		kube:                    kube,
+		logger:                  logger,
+		gatewayEventChan:        gatewayEventChan,
+		referenceGrantValidator: newReferenceGrantValidator(client),
 	}
 }
 
@@ -129,6 +134,11 @@ func (c *MCPRouteController) syncMCPRoute(ctx context.Context, mcpRoute *aigv1b1
 	//
 	// Each backend will have its own rule that matches the internalapi.MCPBackendHeader set by the MCP proxy.
 	// This allows the MCP proxy to route requests to the correct backend based on the header.
+	//
+	// A denied backend is left in existingPerBackendRoutes so the cleanup below deprograms what a
+	// revoked ReferenceGrant no longer authorizes, and is reported only afterwards. Failing to evaluate
+	// the grants is not a denial and must not tear down backends that are still authorized.
+	var deniedErr error
 	for i := range mcpRoute.Spec.BackendRefs {
 		ref := &mcpRoute.Spec.BackendRefs[i]
 		name := mcpPerBackendRefHTTPRouteName(mcpRoute.Name, ref.Name)
@@ -140,7 +150,12 @@ func (c *MCPRouteController) syncMCPRoute(ctx context.Context, mcpRoute *aigv1b1
 			}
 		}
 		if err = c.newPerBackendRefHTTPRoute(ctx, httpRoute, mcpRoute, ref); err != nil {
-			return fmt.Errorf("failed to construct a new HTTPRoute for backend %s: %w", ref.Name, err)
+			err = fmt.Errorf("failed to construct a new HTTPRoute for backend %s: %w", ref.Name, err)
+			if errors.Is(err, errReferenceNotPermitted) {
+				deniedErr = errors.Join(deniedErr, err)
+				continue
+			}
+			return err
 		}
 		if err = c.createOrUpdateHTTPRoute(ctx, httpRoute, existing); err != nil {
 			return fmt.Errorf("failed to create or update HTTPRoute for backend %s: %w", ref.Name, err)
@@ -150,6 +165,9 @@ func (c *MCPRouteController) syncMCPRoute(ctx context.Context, mcpRoute *aigv1b1
 
 	if err = c.deleteOrphanedPerBackendResources(ctx, mcpRoute, existingPerBackendRoutes); err != nil {
 		return fmt.Errorf("failed to delete orphaned per-backend resources: %w", err)
+	}
+	if deniedErr != nil {
+		return deniedErr
 	}
 
 	// Reconciles MCPRouteSecurityPolicy and creates/updates its associated envoy gateway resources.
@@ -445,12 +463,21 @@ func copyMCPRouteMetadataToHTTPRoute(dst *gwapiv1.HTTPRoute, mcpRoute *aigv1b1.M
 	dst.Spec.Hostnames = mcpRoute.Spec.Hostnames
 }
 
+// mcpBackendRefGroupKind returns the group and kind of the given backend reference, applying the
+// Gateway API BackendObjectReference defaults ("" and "Service") when they are unset.
+func mcpBackendRefGroupKind(ref *aigv1b1.MCPRouteBackendRef) (gwapiv1b1.Group, gwapiv1b1.Kind) {
+	return ptr.Deref(ref.Group, coreGroup), ptr.Deref(ref.Kind, serviceKind)
+}
+
 // newPerBackendRefHTTPRoute creates an HTTPRoute for each backend reference in the MCPRoute.
 func (c *MCPRouteController) newPerBackendRefHTTPRoute(ctx context.Context, dst *gwapiv1.HTTPRoute, mcpRoute *aigv1b1.MCPRoute, ref *aigv1b1.MCPRouteBackendRef) error {
 	if ns := ref.Namespace; ns != nil && *ns != gwapiv1.Namespace(mcpRoute.Namespace) {
-		// TODO: do this in a CEL or webhook validation or start supporting cross-namespace references with ReferenceGrant.
-		return fmt.Errorf("cross-namespace backend reference is not supported: backend %s/%s in MCPRoute %s/%s",
-			*ns, ref.Name, mcpRoute.Namespace, mcpRoute.Name)
+		group, kind := mcpBackendRefGroupKind(ref)
+		if err := c.referenceGrantValidator.validateMCPBackendReference(
+			ctx, mcpRoute.Namespace, string(*ns), string(ref.Name), group, kind,
+		); err != nil {
+			return err
+		}
 	}
 	mcpBackendToHTTPRouteRule, err := c.mcpBackendRefToHTTPRouteRule(ctx, mcpRoute, ref)
 	if err != nil {
@@ -896,18 +923,28 @@ func (c *MCPRouteController) ensureCredentialSecret(ctx context.Context, secretN
 	return nil
 }
 
-func (c *MCPRouteController) readAPIKey(ctx context.Context, namespace string, apiKey *aigv1b1.MCPBackendAPIKey) (string, error) {
+func (c *MCPRouteController) readAPIKey(ctx context.Context, routeNamespace string, apiKey *aigv1b1.MCPBackendAPIKey) (string, error) {
 	key := ptr.Deref(apiKey.Inline, "")
 	if key == "" {
 		secretRef := apiKey.SecretRef
-		secret, err := c.kube.CoreV1().Secrets(namespace).Get(ctx, string(secretRef.Name), metav1.GetOptions{})
+		secretNamespace := routeNamespace
+		if secretRef.Namespace != nil && *secretRef.Namespace != "" {
+			secretNamespace = string(*secretRef.Namespace)
+		}
+		// Not guarded on the namespaces differing: the validation is a no-op for a same-namespace Secret.
+		if err := c.referenceGrantValidator.validateMCPSecretReference(
+			ctx, routeNamespace, secretNamespace, string(secretRef.Name),
+		); err != nil {
+			return "", err
+		}
+		secret, err := c.kube.CoreV1().Secrets(secretNamespace).Get(ctx, string(secretRef.Name), metav1.GetOptions{})
 		if err != nil {
 			return "", fmt.Errorf("failed to get secret for API key: %w", err)
 		}
 		if k, ok := secret.Data["apiKey"]; ok {
 			key = string(k)
 		} else if key, ok = secret.StringData["apiKey"]; !ok {
-			return "", fmt.Errorf("secret %s/%s does not contain 'apiKey' key", namespace, secretRef.Name)
+			return "", fmt.Errorf("secret %s/%s does not contain 'apiKey' key", secretNamespace, secretRef.Name)
 		}
 	}
 	return key, nil
