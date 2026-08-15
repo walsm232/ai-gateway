@@ -105,7 +105,7 @@ func (c *ReferenceGrantController) getAffectedAIGatewayRoutes(
 	var affectedRoutes []*aigv1b1.AIGatewayRoute
 	for i := range routes.Items {
 		route := &routes.Items[i]
-		if c.routeReferencesNamespace(route, targetNamespace) {
+		if c.aiGatewayRouteReferencesNamespace(route, targetNamespace) {
 			affectedRoutes = append(affectedRoutes, route)
 		}
 	}
@@ -138,6 +138,10 @@ func (c *ReferenceGrantController) getAffectedMCPRoutes(
 // mcpRouteReferencesNamespace checks if an MCPRoute has any backend or credential Secret reference
 // to a specific namespace.
 func (c *ReferenceGrantController) mcpRouteReferencesNamespace(route *aigv1b1.MCPRoute, namespace string) bool {
+	// Same-namespace references never need a grant, so a grant here cannot affect this route.
+	if route.Namespace == namespace {
+		return false
+	}
 	for i := range route.Spec.BackendRefs {
 		ref := &route.Spec.BackendRefs[i]
 		if ref.Namespace != nil && string(*ref.Namespace) == namespace {
@@ -153,8 +157,12 @@ func (c *ReferenceGrantController) mcpRouteReferencesNamespace(route *aigv1b1.MC
 	return false
 }
 
-// routeReferencesNamespace checks if an AIGatewayRoute has any backend references to a specific namespace.
-func (c *ReferenceGrantController) routeReferencesNamespace(route *aigv1b1.AIGatewayRoute, namespace string) bool {
+// aiGatewayRouteReferencesNamespace checks if an AIGatewayRoute has any backend references to a specific namespace.
+func (c *ReferenceGrantController) aiGatewayRouteReferencesNamespace(route *aigv1b1.AIGatewayRoute, namespace string) bool {
+	// Same-namespace references never need a grant, so a grant here cannot affect this route.
+	if route.Namespace == namespace {
+		return false
+	}
 	for _, rule := range route.Spec.Rules {
 		for _, backendRef := range rule.BackendRefs {
 			// Only check AIServiceBackend references
