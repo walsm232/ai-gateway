@@ -77,7 +77,7 @@ func (v *referenceGrantValidator) validateAIServiceBackendReference(
 	backendNamespace string,
 	backendName string,
 ) error {
-	return v.validateReference(ctx, aiGatewayRouteSource, routeNamespace, backendNamespace, backendName, aiServiceBackendGroup, aiServiceBackendKind)
+	return v.validateReference(ctx, []referenceSource{aiGatewayRouteSource}, routeNamespace, backendNamespace, backendName, aiServiceBackendGroup, aiServiceBackendKind)
 }
 
 // validateMCPBackendReference validates that an MCPRoute can reference a backend (a Service or an Envoy
@@ -95,10 +95,8 @@ func (v *referenceGrantValidator) validateMCPBackendReference(
 	backendGroup gwapiv1b1.Group,
 	backendKind gwapiv1b1.Kind,
 ) error {
-	if err := v.validateReference(ctx, mcpRouteSource, routeNamespace, backendNamespace, backendName, backendGroup, backendKind); err != nil {
-		return err
-	}
-	return v.validateReference(ctx, httpRouteSource, routeNamespace, backendNamespace, backendName, backendGroup, backendKind)
+	return v.validateReference(ctx, []referenceSource{mcpRouteSource, httpRouteSource},
+		routeNamespace, backendNamespace, backendName, backendGroup, backendKind)
 }
 
 // validateMCPSecretReference validates that an MCPRoute can reference a credential Secret in a
@@ -110,7 +108,7 @@ func (v *referenceGrantValidator) validateMCPSecretReference(
 	secretNamespace string,
 	secretName string,
 ) error {
-	return v.validateReference(ctx, mcpRouteSource, routeNamespace, secretNamespace, secretName, coreGroup, secretKind)
+	return v.validateReference(ctx, []referenceSource{mcpRouteSource}, routeNamespace, secretNamespace, secretName, coreGroup, secretKind)
 }
 
 // validateInferencePoolReference validates that an AIGatewayRoute can reference an InferencePool
@@ -130,15 +128,16 @@ func (v *referenceGrantValidator) validateInferencePoolReference(
 	poolNamespace string,
 	poolName string,
 ) error {
-	return v.validateReference(ctx, aiGatewayRouteSource, routeNamespace, poolNamespace, poolName, inferencePoolGroup, inferencePoolKind)
+	return v.validateReference(ctx, []referenceSource{aiGatewayRouteSource}, routeNamespace, poolNamespace, poolName, inferencePoolGroup, inferencePoolKind)
 }
 
-// validateReference validates that a resource identified by source can reference a target resource
+// validateReference validates that every resource in sources can reference a target resource
 // (identified by targetGroup/targetKind/targetName) in a different namespace by checking for a valid
-// ReferenceGrant.
+// ReferenceGrant. A single lookup serves every source, since the grants that could authorize them are
+// the same set.
 func (v *referenceGrantValidator) validateReference(
 	ctx context.Context,
-	source referenceSource,
+	sources []referenceSource,
 	routeNamespace string,
 	targetNamespace string,
 	targetName string,
@@ -159,22 +158,27 @@ func (v *referenceGrantValidator) validateReference(
 			targetNamespace, targetKind, err)
 	}
 
-	// Check if any ReferenceGrant allows this cross-namespace reference.
-	for i := range referenceGrants.Items {
-		grant := &referenceGrants.Items[i]
-		if v.isReferenceGrantValid(grant, source, routeNamespace, targetName, targetGroup, targetKind) {
-			return nil
+	for _, source := range sources {
+		permitted := false
+		for i := range referenceGrants.Items {
+			if v.isReferenceGrantValid(&referenceGrants.Items[i], source, routeNamespace, targetName, targetGroup, targetKind) {
+				permitted = true
+				break
+			}
+		}
+		if !permitted {
+			return fmt.Errorf(
+				"cross-namespace reference from %s in namespace %s to %s %s in namespace %s is %w: "+
+					"no valid ReferenceGrant found in namespace %s. "+
+					"A ReferenceGrant must allow %s from namespace %s to reference %s %s in namespace %s",
+				source.kind, routeNamespace, targetKind, targetName, targetNamespace, errReferenceNotPermitted,
+				targetNamespace,
+				source.kind, routeNamespace, targetKind, targetName, targetNamespace,
+			)
 		}
 	}
 
-	return fmt.Errorf(
-		"cross-namespace reference from %s in namespace %s to %s %s in namespace %s is %w: "+
-			"no valid ReferenceGrant found in namespace %s. "+
-			"A ReferenceGrant must allow %s from namespace %s to reference %s %s in namespace %s",
-		source.kind, routeNamespace, targetKind, targetName, targetNamespace, errReferenceNotPermitted,
-		targetNamespace,
-		source.kind, routeNamespace, targetKind, targetName, targetNamespace,
-	)
+	return nil
 }
 
 // isReferenceGrantValid checks if a ReferenceGrant allows the resource identified by source to
