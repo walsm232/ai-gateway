@@ -433,6 +433,55 @@ func TestReferenceGrantController_GetAffectedAIGatewayRoutes(t *testing.T) {
 			expectedRoutes: []string{"affected-route"},
 		},
 		{
+			// InferencePool backends are validated against a ReferenceGrant just like AIServiceBackend
+			// ones, so a grant in the pool's namespace must reconcile the route referencing it.
+			name: "Grant with route referencing InferencePool in grant namespace",
+			referenceGrant: gwapiv1b1.ReferenceGrant{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-grant",
+					Namespace: "pool-ns",
+				},
+				Spec: gwapiv1b1.ReferenceGrantSpec{
+					From: []gwapiv1b1.ReferenceGrantFrom{
+						{
+							Group:     aiServiceBackendGroup,
+							Kind:      aiGatewayRouteKind,
+							Namespace: "route-ns",
+						},
+					},
+					To: []gwapiv1b1.ReferenceGrantTo{
+						{
+							Group: inferencePoolGroup,
+							Kind:  inferencePoolKind,
+						},
+					},
+				},
+			},
+			routes: []aigv1b1.AIGatewayRoute{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "inference-pool-route",
+						Namespace: "route-ns",
+					},
+					Spec: aigv1b1.AIGatewayRouteSpec{
+						Rules: []aigv1b1.AIGatewayRouteRule{
+							{
+								BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
+									{
+										Name:      "pool",
+										Namespace: ptr.To(gwapiv1.Namespace("pool-ns")),
+										Group:     ptr.To(inferencePoolGroup),
+										Kind:      ptr.To(inferencePoolKind),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedRoutes: []string{"inference-pool-route"},
+		},
+		{
 			// The route sits outside the namespace the grant's "from" names, but still references the
 			// grant's namespace, so it is reconciled: another grant there may be what authorizes it.
 			name: "Route in another namespace referencing the grant namespace",

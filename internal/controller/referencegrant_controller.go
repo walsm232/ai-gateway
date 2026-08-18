@@ -165,12 +165,8 @@ func (c *ReferenceGrantController) aiGatewayRouteReferencesNamespace(route *aigv
 	}
 	for _, rule := range route.Spec.Rules {
 		for _, backendRef := range rule.BackendRefs {
-			// Only check AIServiceBackend references
-			if backendRef.IsAIServiceBackend() {
-				backendNs := backendRef.GetNamespace(route.Namespace)
-				if backendNs == namespace {
-					return true
-				}
+			if backendRef.GetNamespace(route.Namespace) == namespace {
+				return true
 			}
 		}
 	}
